@@ -99,7 +99,31 @@ def _fused_recurrent_decode_device(
     return out.reshape(batch, 1, *out.shape[1:]).to(q.dtype), initial_state
 
 
-def _fused_recurrent_multi_device(
+_TOKENS_ACTUAL_SEQ_LENGTHS_CACHE: dict[tuple[str, int, int], torch.Tensor] = {}
+
+
+def _tokens_actual_seq_lengths(
+    device: torch.device, batch: int, token_count: int
+) -> torch.Tensor:
+    """``[0, T, T, ...]`` cuSeqlens-style metadata for a T-token step.
+
+    Built from device-side fills and cached per (device, batch, token_count) so
+    aclgraph capture records a stable address (``torch.tensor`` from host
+    values would H2D-sync, which is illegal during capture).
+    """
+
+    key = (str(device), batch, token_count)
+    cached = _TOKENS_ACTUAL_SEQ_LENGTHS_CACHE.get(key)
+    if cached is None:
+        cached = torch.cat([
+            torch.zeros(1, dtype=torch.int32, device=device),
+            torch.full((batch,), token_count, dtype=torch.int32, device=device),
+        ])
+        _TOKENS_ACTUAL_SEQ_LENGTHS_CACHE[key] = cached
+    return cached
+
+
+def _fused_recurrent_tokens_device(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -112,17 +136,17 @@ def _fused_recurrent_multi_device(
     seq_size_per_block: int,
     token_count: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Multi-token (target-verify, T = k + 1 <= 8) step with device-side metadata.
+    """Multi-token (target-verify, T = k + 1 <= 8) step, single AscendC launch.
 
-    Runs the verified T==1 semantics once per token: the fla-npu multi-token
-    single-launch writes incorrect middle-page BF16 snapshots (its state
-    diverges from the stepwise reference by ~1e3 with identical inputs).
+    The operator keeps the recurrence in FP32 in UB across the T tokens and
+    writes each token's BF16 snapshot to ``ssm_state_indices[i]``, so the whole
+    verify is one launch. Only the first write page is seeded from the
+    committed page; the kernel carries the state internally.
+
     Pages are gathered from ``block_map`` on device via
-    ``speculative_state_indices`` (same read/write contract as the
-    single-token decode path), each token's cross-page seed reuses the triton
-    page-row migration, and ``actual_seq_lengths`` reuses the cached
-    ``[0, 1, 1, ...]`` device tensor, so the whole loop captures without any
-    host sync.
+    ``speculative_state_indices`` (same read/write contract as the single-token
+    decode path) and ``actual_seq_lengths`` reuses a cached device tensor, so
+    the step captures without any host sync.
     """
 
     from rtp_llm.models_py.kernels.ascend.paged_state import (
@@ -135,27 +159,22 @@ def _fused_recurrent_multi_device(
     read_idx, write_idxs = speculative_state_indices(
         block_map, sequence_lengths, int(seq_size_per_block), token_count
     )
-    asl = _decode_actual_seq_lengths(q.device, batch)
-    outputs = []
-    for token_idx in range(token_count):
-        src = read_idx if token_idx == 0 else write_idxs[token_idx - 1]
-        seed_state_segment(initial_state, src, write_idxs[token_idx])
-        result = ascendc.npu_recurrent_gated_delta_rule(
-            q[:, token_idx].reshape(-1, *q.shape[2:]).to(torch.bfloat16),
-            k[:, token_idx].reshape(-1, *k.shape[2:]).to(torch.bfloat16),
-            v[:, token_idx].reshape(-1, *v.shape[2:]).to(torch.bfloat16),
-            initial_state,
-            beta=beta[:, token_idx].reshape(-1, beta.shape[-1]).to(torch.bfloat16),
-            scale=float(scale),
-            actual_seq_lengths=asl,
-            ssm_state_indices=write_idxs[token_idx].to(torch.int32),
-            g=g[:, token_idx].reshape(-1, g.shape[-1]).float(),
-        )
-        out_t = result[0] if isinstance(result, (tuple, list)) else result
-        outputs.append(out_t.reshape(batch, 1, *out_t.shape[1:]))
-
-    out = torch.cat(outputs, dim=1)
-    return out.to(q.dtype), initial_state
+    seed_state_segment(initial_state, read_idx, write_idxs[0])
+    # (batch, T) -> batch-major flat token order expected by the operator.
+    state_indices = torch.stack(write_idxs, dim=1).reshape(-1)
+    result = ascendc.npu_recurrent_gated_delta_rule(
+        q.reshape(-1, *q.shape[2:]).to(torch.bfloat16),
+        k.reshape(-1, *k.shape[2:]).to(torch.bfloat16),
+        v.reshape(-1, *v.shape[2:]).to(torch.bfloat16),
+        initial_state,
+        beta=beta.reshape(-1, beta.shape[-1]).to(torch.bfloat16),
+        scale=float(scale),
+        actual_seq_lengths=_tokens_actual_seq_lengths(q.device, batch, token_count),
+        ssm_state_indices=state_indices.to(torch.int32),
+        g=g.reshape(-1, g.shape[-1]).float(),
+    )
+    out = result[0] if isinstance(result, (tuple, list)) else result
+    return out.reshape(batch, token_count, *out.shape[1:]).to(q.dtype), initial_state
 
 
 def _resolve_state_pages(
@@ -221,6 +240,20 @@ def _resolve_state_pages(
     return read_pages, write_pages
 
 
+def _seed_first_write_pages(
+    state: torch.Tensor,
+    read_pages: list[int],
+    write_pages: list[list[int]],
+) -> None:
+    for batch_idx, batch_pages in enumerate(write_pages):
+        if not batch_pages:
+            continue
+        source = read_pages[batch_idx]
+        destination = batch_pages[0]
+        if source != destination:
+            state[destination].copy_(state[source])
+
+
 def fused_recurrent_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -283,10 +316,10 @@ def fused_recurrent_gated_delta_rule(
         k = l2norm_fwd(k)
 
     # Device-metadata path shared by eager and aclgraph capture — no D2H.
-    # Single-token decode uses one launch; multi-token target verify runs the
-    # T==1 semantics stepwise (the single-launch multi-token form writes wrong
-    # middle-page snapshots — see _fused_recurrent_multi_device).  The
-    # host-metadata fallback below is only reached for non-2-D block maps.
+    # Single-token decode and multi-token target verify both use one AscendC
+    # launch; the kernel keeps the recurrence in FP32 in UB across the T tokens
+    # and writes one BF16 snapshot per token page.  The host-metadata fallback
+    # below is only reached for non-2-D block maps.
     if (
         token_count >= 1
         and block_map is not None
@@ -299,7 +332,7 @@ def fused_recurrent_gated_delta_rule(
                 q, k, v, g, beta, scale, initial_state,
                 block_map, sequence_lengths, int(seq_size_per_block),
             )
-        return _fused_recurrent_multi_device(
+        return _fused_recurrent_tokens_device(
             q, k, v, g, beta, scale, initial_state,
             block_map, sequence_lengths, int(seq_size_per_block), token_count,
         )
@@ -317,35 +350,31 @@ def fused_recurrent_gated_delta_rule(
 
     ascendc = _get_ascendc_ops()
 
-    # Host-metadata fallback (no 2-D paged block map), eager only.  Same
-    # stepwise T==1 contract as the device path above: seed the destination
-    # page with the running state before each in-place single-token update
-    # (the single-launch multi-token form writes wrong middle-page snapshots —
-    # see _fused_recurrent_multi_device).
-    outputs = []
-    for token_idx in range(token_count):
-        for batch_idx in range(batch):
-            src = read_pages[batch_idx] if token_idx == 0 else write_pages[batch_idx][token_idx - 1]
-            dst = write_pages[batch_idx][token_idx]
-            if src != dst:
-                state[dst].copy_(state[src])
-        step_indices = [write_pages[batch_idx][token_idx] for batch_idx in range(batch)]
-        result = ascendc.npu_recurrent_gated_delta_rule(
-            q[:, token_idx].reshape(-1, *q.shape[2:]).to(torch.bfloat16),
-            k[:, token_idx].reshape(-1, *k.shape[2:]).to(torch.bfloat16),
-            v[:, token_idx].reshape(-1, *v.shape[2:]).to(torch.bfloat16),
-            state,
-            beta=beta[:, token_idx].reshape(-1, beta.shape[-1]).to(torch.bfloat16),
-            scale=float(scale),
-            actual_seq_lengths=torch.tensor([0] + [1] * batch, dtype=torch.int32, device=q.device),
-            ssm_state_indices=torch.tensor(step_indices, dtype=torch.int32, device=q.device),
-            g=g[:, token_idx].reshape(-1, g.shape[-1]).float(),
-        )
-        out_t = result[0] if isinstance(result, (tuple, list)) else result
-        outputs.append(out_t.reshape(batch, 1, *out_t.shape[1:]))
-
-    out = torch.cat(outputs, dim=1)
-    return out.to(q.dtype), state
+    # The operator keeps the recurrence in FP32 across all tokens and uses one
+    # state index per token for the BF16 snapshots.  Seed only the first output
+    # page from the previously committed page; later pages are written by the
+    # same launch.
+    _seed_first_write_pages(state, read_pages, write_pages)
+    state_indices = [page for batch_pages in write_pages for page in batch_pages]
+    actual_seq_lengths = torch.tensor(
+        [0] + [token_count] * batch,
+        dtype=torch.int32,
+        device=q.device,
+    )
+    ssm_state_indices = torch.tensor(state_indices, dtype=torch.int32, device=q.device)
+    result = ascendc.npu_recurrent_gated_delta_rule(
+        q.reshape(-1, *q.shape[2:]).to(torch.bfloat16),
+        k.reshape(-1, *k.shape[2:]).to(torch.bfloat16),
+        v.reshape(-1, *v.shape[2:]).to(torch.bfloat16),
+        state,
+        beta=beta.reshape(-1, beta.shape[-1]).to(torch.bfloat16),
+        scale=float(scale),
+        actual_seq_lengths=actual_seq_lengths,
+        ssm_state_indices=ssm_state_indices,
+        g=g.reshape(-1, g.shape[-1]).float(),
+    )
+    out = result[0] if isinstance(result, (tuple, list)) else result
+    return out.reshape(batch, token_count, *out.shape[1:]).to(q.dtype), state
 
 
 __all__ = ["fused_recurrent_gated_delta_rule"]

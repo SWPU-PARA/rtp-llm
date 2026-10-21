@@ -15,7 +15,9 @@ NormalCacheStore::~NormalCacheStore() {
         thread_pool_.reset();
     }
 
-    request_block_buffer_store_->stop();
+    if (request_block_buffer_store_) {
+        request_block_buffer_store_->stop();
+    }
     messager_.reset();
     request_block_buffer_store_.reset();
     RTP_LLM_LOG_INFO("destory cache store done");
@@ -35,7 +37,7 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
     if (params_.memory_util != nullptr) {
         memory_util_ = params.memory_util;
     } else {
-        memory_util_ = createMemoryUtilImpl(params_.rdma_mode);
+        memory_util_ = createMemoryUtilImpl(params_);
     }
 
     request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(memory_util_);
@@ -43,7 +45,7 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
     // always has metric
     metrics_reporter_ = params.metrics_reporter;
 
-    messager_ = createMessager(memory_util_, request_block_buffer_store_, metrics_reporter_);
+    messager_ = createMessager(params_, memory_util_, request_block_buffer_store_, metrics_reporter_);
     MessagerInitParams messager_init_params;
     messager_init_params.server_port                  = params.listen_port;
     messager_init_params.rdma_server_port             = params.rdma_listen_port;

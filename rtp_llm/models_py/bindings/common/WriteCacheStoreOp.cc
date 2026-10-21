@@ -15,45 +15,35 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
         return;
     }
 
-    const PyCacheStoreInputs& cache_store_inputs = cache_store_member.value();
+    const auto& cache_store_inputs = cache_store_member.value();
 
-    // Capture all torch::Tensors by value so the underlying memory stays alive
-    // in the background thread. torch::Tensor copy is a cheap refcount bump.
-    auto captured_input_lengths          = input_lengths;
-    auto captured_prefix_lengths         = prefix_lengths;
-    auto captured_kv_cache_block_id_host = kv_cache_block_id_host;
-    auto captured_cache_store            = cache_store_inputs;
-    auto captured_kv_cache               = kv_cache.value();
+    // Retain physical pages on the caller thread. Tensor references alone do
+    // not protect pages while the asynchronous writer is waiting in its queue.
+    CacheStoreInputs inputs{input_lengths,
+                            prefix_lengths,
+                            kv_cache_block_id_host,
+                            cache_store_inputs.kv_cache_layer_to_group,
+                            cache_store_inputs.kv_cache_group_types,
+                            cache_store_inputs.context_batch_size,
+                            cache_store_inputs.decoder_batch_size,
+                            cache_store_inputs.request_id,
+                            cache_store_inputs.request_pd_separation,
+                            cache_store_inputs.cache_keys,
+                            cache_store_inputs.tokens_per_block,
+                            cache_store_inputs.kv_block_stride_bytes,
+                            cache_store_inputs.kv_scale_stride_bytes,
+                            cache_store_inputs.pd_separation,
+                            cache_store_inputs.model_id,
+                            cache_store_inputs.decode_entrance,
+                            cache_store_inputs.warmup,
+                            kv_cache->layer_id,
+                            runtimeCreateEvent(),
+                            {}};
+    inputs.publication_leases = retainCacheStoreBlocks(inputs, cache_store_inputs.cache_store);
 
-    // Create event in main thread to avoid cudaEventRecord contention on background threads.
-    auto event = runtimeCreateEvent();
-
-    auto run = [captured_input_lengths,
-                captured_prefix_lengths,
-                captured_kv_cache_block_id_host,
-                captured_cache_store,
-                captured_kv_cache,
-                event = std::move(event)]() mutable {
-        CacheStoreInputs inputs{captured_input_lengths,
-                                captured_prefix_lengths,
-                                captured_kv_cache_block_id_host,
-                                captured_cache_store.kv_cache_layer_to_group,
-                                captured_cache_store.kv_cache_group_types,
-                                captured_cache_store.context_batch_size,
-                                captured_cache_store.decoder_batch_size,
-                                captured_cache_store.request_id,
-                                captured_cache_store.request_pd_separation,
-                                captured_cache_store.cache_keys,
-                                captured_cache_store.tokens_per_block,
-                                captured_cache_store.kv_block_stride_bytes,
-                                captured_cache_store.kv_scale_stride_bytes,
-                                captured_cache_store.pd_separation,
-                                captured_cache_store.model_id,
-                                captured_cache_store.decode_entrance,
-                                captured_cache_store.warmup,
-                                captured_kv_cache.layer_id,
-                                std::move(event)};
-
+    auto run = [inputs               = std::move(inputs),
+                captured_cache_store = cache_store_inputs,
+                captured_kv_cache    = kv_cache.value()]() mutable {
         KvCacheInfo kv_cache_info;
         kv_cache_info.kv_cache_buffer = captured_kv_cache.kv_cache_base;
         kv_cache_info.kv_scale_buffer =

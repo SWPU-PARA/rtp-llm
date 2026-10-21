@@ -8,6 +8,11 @@
 
 
 #include <memory>
+#include <cstdint>
+#include <functional>
+#include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -53,7 +58,26 @@ public:
 
     virtual const std::shared_ptr<MemoryUtil>& getMemoryUtil() const = 0;
 
+    using BlockLeaseProvider = std::function<std::shared_ptr<void>(const std::vector<int32_t>&)>;
+
+    // Configure once during initialization, before publishing or loading blocks.
+    void setBlockLeaseProvider(BlockLeaseProvider provider) {
+        block_lease_provider_ = std::move(provider);
+    }
+
+    std::shared_ptr<void> retainTransferBlocks(const std::vector<int32_t>& blocks) const {
+        if (!block_lease_provider_) {
+            throw std::logic_error("direct cache transfer requires a physical block lease provider");
+        }
+        return block_lease_provider_(blocks);
+    }
+
+    // Called after all pools have been registered, before serving requests.
+    virtual void finishRegistration() {}
     virtual void debugInfo() = 0;
+
+private:
+    BlockLeaseProvider block_lease_provider_;
 };
 
 }  // namespace rtp_llm

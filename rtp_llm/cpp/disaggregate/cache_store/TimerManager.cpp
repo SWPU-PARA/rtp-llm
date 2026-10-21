@@ -16,7 +16,7 @@ std::shared_ptr<Timer> TimerManager::addTimer(int64_t timeoutMs, Timer::Callback
 
     {
         autil::ScopedWriteLock lock(_rwlock);
-        _timeoutCheckTimers[expiredTimeUs] = timer;
+        _timeoutCheckTimers.emplace(expiredTimeUs, timer);
     }
     return timer;
 }
@@ -29,7 +29,7 @@ size_t TimerManager::getActiveTimerCount() const {
 void TimerManager::timeoutProc() {
     auto current_time_us = currentTimeUs();
 
-    std::map<int64_t, std::shared_ptr<Timer>> timeoutTimers;
+    std::multimap<int64_t, std::shared_ptr<Timer>> timeoutTimers;
     {
         // extract all timeout timer
         autil::ScopedWriteLock lock(_rwlock);

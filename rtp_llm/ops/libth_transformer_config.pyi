@@ -215,6 +215,7 @@ class CPRotateMethod:
 
 
 class CacheStoreConfig:
+    cache_store_transport: str
     cache_store_rdma_mode: bool
     wrr_available_ratio: int
     rank_factor: int

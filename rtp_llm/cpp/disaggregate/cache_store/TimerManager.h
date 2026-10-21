@@ -1,5 +1,7 @@
 #pragma once
 
+#include <map>
+
 #include "rtp_llm/cpp/disaggregate/cache_store/Timer.h"
 #include "autil/Lock.h"
 #include "autil/LoopThread.h"
@@ -20,7 +22,7 @@ private:
 
 private:
     mutable autil::ReadWriteLock              _rwlock;
-    std::map<int64_t, std::shared_ptr<Timer>> _timeoutCheckTimers;
+    std::multimap<int64_t, std::shared_ptr<Timer>> _timeoutCheckTimers;
 
     autil::LoopThreadPtr _timerThread;
 };

@@ -295,6 +295,8 @@ struct VitConfig {
 };
 
 struct CacheStoreConfig {
+    // Empty preserves the existing transport selection.
+    std::string cache_store_transport;
     bool    cache_store_rdma_mode               = false;
     int     wrr_available_ratio                 = 80;
     int     rank_factor                         = 0;

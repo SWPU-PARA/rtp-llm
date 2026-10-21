@@ -67,6 +67,18 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
     auto cache_manager = engine_->resourceContext().cache_manager;
 
     CacheStoreInitParams params;
+    params.transport = init_params.cache_store_config.cache_store_transport;
+    if (params.transport == "hixl") {
+        RTP_LLM_CHECK_WITH_INFO(init_params.parallelism_config.tp_size == 1,
+                                "Ascend HIXL PD currently requires TP1 instances");
+        RTP_LLM_CHECK_WITH_INFO(!engine_->isMTPEagle() || init_params.sp_config.type == SP_TYPE_MTP,
+                                "Ascend HIXL PD supports MTP but not Eagle");
+
+        const auto port = init_params.pd_sep_config.cache_store_rdma_listen_port;
+        RTP_LLM_CHECK_WITH_INFO(port > 0 && port <= 65535 && port != init_params.pd_sep_config.cache_store_listen_port,
+                                "HIXL requires a valid RDMA listen port distinct from its control port");
+        params.hixl_engine_id = autil::NetUtil::getBindIp() + ":" + std::to_string(port);
+    }
     params.listen_port                  = init_params.pd_sep_config.cache_store_listen_port;
     params.rdma_listen_port             = init_params.pd_sep_config.cache_store_rdma_listen_port;
     params.rdma_mode                    = init_params.pd_sep_config.cache_store_rdma_mode;
@@ -89,6 +101,7 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
 
     cache_manager->setCacheStore(cache_store_);
     cache_manager->regUserMr(maga_init_params_.model_id, cache_store_);
+    cache_store_->finishRegistration();
 
     resource_.cache_store = std::dynamic_pointer_cast<NormalCacheStore>(cache_store_);
 }

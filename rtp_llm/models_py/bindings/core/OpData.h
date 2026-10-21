@@ -194,6 +194,8 @@ struct CacheStoreInputs {
     // contention on background threads. nullptr means writeCacheStore will
     // create an event on the spot (single-threaded / C++ path).
     std::shared_ptr<torch::Event> pre_created_event = nullptr;
+    // One independent physical page lease per request, acquired before enqueue.
+    std::vector<std::shared_ptr<void>> publication_leases;
 };
 
 struct AttentionCommonInputs {

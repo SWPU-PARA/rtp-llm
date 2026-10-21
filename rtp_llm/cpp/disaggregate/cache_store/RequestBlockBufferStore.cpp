@@ -35,6 +35,12 @@ bool RequestBlockBufferStore::setRequestBlockBuffer(const std::shared_ptr<Reques
             continue;
         }
 
+        if (memory_util_->requiresBlockLease()) {
+            RTP_LLM_LOG_ERROR("direct publication requires registered memory, request=%s block=%s",
+                              request_block_buffer->getRequestId().c_str(),
+                              block->key.c_str());
+            return false;
+        }
         auto valid_block = makeValidBlock(block);
         if (!valid_block) {
             RTP_LLM_LOG_WARNING("set request block buffer failed to make valid block, request id %s",
@@ -133,7 +139,7 @@ RequestBlockBufferStore::getOrInsertRequestBlockBuffer(const std::string& reques
 }
 
 bool RequestBlockBufferStore::isValidBlock(const std::shared_ptr<BlockBuffer>& block) {
-    if (memory_util_->isRdmaMode()) {
+    if (memory_util_->supportsDeviceMemory()) {
         return memory_util_->isMemoryMr(block->addr.get(), block->len, block->gpu_mem, block->adopted);
     }
     return block->gpu_mem == false;
@@ -195,11 +201,8 @@ void RequestBlockBufferStore::delRequestBlockBuffer(const std::string& requestid
     std::shared_ptr<RequestBlockBuffer> request_block_buffer;
     {
         std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
-        auto                                iter = request_cache_map_.find(requestid);
-        if (iter != request_cache_map_.end()) {
-            request_block_buffer          = iter->second;
-            request_cache_map_[requestid] = nullptr;
-        }
+        // Leave an end marker even when the first publication has not arrived.
+        request_block_buffer = std::move(request_cache_map_[requestid]);
     }
     if (request_block_buffer) {
         request_block_buffer->notifyRequestDone();

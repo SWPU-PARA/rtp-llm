@@ -650,6 +650,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 auto cache_key = makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id);
                 // FT_LOG_DEBUG("large model load cache_key %s", cache_key.c_str());
                 auto block_id = block_ids[block_pos];
+                auto lease    = resource_.cache_store->getMemoryUtil()->requiresBlockLease() ?
+                                    resource_.cache_store->retainTransferBlocks({block_id}) :
+                                    nullptr;
 
                 const int local_part_cnt = peer_cnt;
                 const int local_part_id  = i;
@@ -658,7 +661,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                     RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "null block addr for key=%s", key.c_str());
                     RTP_LLM_CHECK_WITH_INFO(block.size_bytes > 0, "zero block size for key=%s", key.c_str());
-                    std::shared_ptr<void> addr(block.addr, [](void*) {});
+                    std::shared_ptr<void> addr(lease, block.addr);
                     load_layer_cache->addBlock(key, addr, static_cast<uint32_t>(block.size_bytes), true, true);
                 };
 
@@ -766,6 +769,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             auto cache_key =
                                 makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id);
                             auto       block_id       = block_ids[block_pos];
+                            auto       lease          = resource_.cache_store->getMemoryUtil()->requiresBlockLease() ?
+                                                            resource_.cache_store->retainTransferBlocks({block_id}) :
+                                                            nullptr;
                             const bool mtp_use_mla    = mtp_cache_cfg.use_mla;
                             const int  local_part_cnt = peer_cnt;
                             const int  local_part_id  = i;
@@ -777,7 +783,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                     block.addr != nullptr, "null block addr for key=%s", key.c_str());
                                 RTP_LLM_CHECK_WITH_INFO(
                                     block.size_bytes > 0, "zero block size for key=%s", key.c_str());
-                                std::shared_ptr<void> addr(block.addr, [](void*) {});
+                                std::shared_ptr<void> addr(lease, block.addr);
                                 load_layer_cache->addBlock(
                                     key, addr, static_cast<uint32_t>(block.size_bytes), true, true);
                             };

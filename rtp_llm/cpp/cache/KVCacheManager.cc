@@ -1,4 +1,6 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/TransferBlockLease.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 
 #include <algorithm>
 #include <chrono>
@@ -429,6 +431,12 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
 // 系统资源管理
 
 void KVCacheManager::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
+    if (cache_store && cache_store->getMemoryUtil()->requiresBlockLease()) {
+        std::weak_ptr<BlockPool> pool = allocator_->getBlockPool();
+        cache_store->setBlockLeaseProvider([pool](const std::vector<int32_t>& blocks) -> std::shared_ptr<void> {
+            return std::make_shared<TransferBlockLease>(pool.lock(), blocks);
+        });
+    }
     allocator_->regUserMr(model_id, std::move(cache_store));
 }
 

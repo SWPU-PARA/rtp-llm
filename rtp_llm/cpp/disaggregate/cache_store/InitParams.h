@@ -26,6 +26,11 @@ public:
     uint32_t thread_count{2};
     uint32_t queue_size{100};
 
+    // Empty selects the legacy factory using rdma_mode.
+    std::string transport;
+    std::string hixl_engine_id;
+    uint32_t    hixl_max_inflight{64};
+
     // memory util
     void*    stream{nullptr};
     bool     rdma_mode{true};

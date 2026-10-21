@@ -2,7 +2,46 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/NoRdmaMemoryUtilImpl.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpMessager.h"
 
+#if USING_ASCEND
+#include "autil/EnvUtil.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/ascend/HixlMemoryUtil.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/ascend/HixlMessager.h"
+#endif
+
 namespace rtp_llm {
+std::shared_ptr<MemoryUtil> createMemoryUtilImpl(const CacheStoreInitParams& params) {
+    if (params.transport.empty()) {
+        return createMemoryUtilImpl(params.rdma_mode);
+    }
+#if USING_ASCEND
+    if (params.transport == "hixl") {
+        return HixlMemoryUtil::create(
+            params.hixl_engine_id,
+            autil::EnvUtil::getEnv("ASCEND_LOCAL_COMM_RES", std::string(R"({"version":"1.3"})")));
+    }
+#endif
+    throw std::invalid_argument("unsupported cache store transport: " + params.transport);
+}
+
+std::shared_ptr<Messager> createMessager(const CacheStoreInitParams&                     params,
+                                         const std::shared_ptr<MemoryUtil>&              memory_util,
+                                         const std::shared_ptr<RequestBlockBufferStore>& store,
+                                         const kmonitor::MetricsReporterPtr&             metrics) {
+    if (params.transport.empty()) {
+        return createMessager(memory_util, store, metrics);
+    }
+#if USING_ASCEND
+    if (params.transport == "hixl") {
+        auto memory = std::dynamic_pointer_cast<HixlMemoryUtil>(memory_util);
+        if (!memory) {
+            throw std::invalid_argument("HIXL transport requires HixlMemoryUtil");
+        }
+        return std::make_shared<HixlMessager>(params, memory, store, metrics);
+    }
+#endif
+    throw std::invalid_argument("unsupported cache store transport: " + params.transport);
+}
+
 std::shared_ptr<MemoryUtil> createMemoryUtilImpl(bool rdma_mode) {
     if (rdma_mode) {
         throw std::runtime_error("rdma mode not supported");

@@ -55,6 +55,7 @@ cc_library(
     hdrs = [
         "BlockCache.h",
         "BlockPool.h",
+        "TransferBlockLease.h",
         "BlockPoolConfig.h",
         "BlockPoolConfigHelper.h",
         "BlockRefCounter.h",
@@ -205,6 +206,7 @@ cc_library(
     deps = [
         ":cache_core",
         "//rtp_llm/cpp/cache/connector",
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + torch_deps(),

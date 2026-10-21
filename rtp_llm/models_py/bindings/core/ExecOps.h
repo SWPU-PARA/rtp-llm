@@ -113,6 +113,9 @@ std::shared_ptr<torch::Event> runtimeCreateEvent();
 // CacheStore (cache_store passed explicitly; see KVCacheManager::getCacheStore)
 // ===================================================================
 
+std::vector<std::shared_ptr<void>> retainCacheStoreBlocks(const CacheStoreInputs&            inputs,
+                                                          const std::shared_ptr<CacheStore>& cache_store);
+
 void runtimeWriteCacheStore(const CacheStoreInputs&     inputs,
                             const KvCacheInfo&          kv_cache,
                             bool                        mla_kvcache,

@@ -274,6 +274,10 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
     // This is called after cache store transfer is complete.
     if (prefill_context.generate_input->generate_config->pd_separation) {
         prefill_context.getStream()->releaseKVCacheForPDSep();
+        if (resource_.cache_store->getMemoryUtil()->requiresBlockLease()) {
+            // Outstanding READ grants retain their pages independently of publication.
+            resource_.cache_store->markRequestEnd(std::to_string(prefill_context.getStream()->streamId()));
+        }
     }
 }
 
@@ -305,15 +309,13 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     auto sp_output_buffer = stream->getSPOutputBuffer();
 
     if (sp_output_buffer) {
-        auto all_probs_cpu =
-            sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
+        auto          all_probs_cpu = sp_output_buffer->all_probs.cpu();
         torch::Tensor hidden_states_cpu;
         if (!sp_output_buffer->hidden_states.defined()) {
             // dummy hidden states, so datatype is not important
             hidden_states_cpu = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
         } else {
-            hidden_states_cpu = sp_output_buffer->hidden_states.is_cuda() ? sp_output_buffer->hidden_states.cpu() :
-                                                                            sp_output_buffer->hidden_states;
+            hidden_states_cpu = sp_output_buffer->hidden_states.cpu();
         }
         QueryConverter::transTensorPB(generate_request.mutable_propose_probs(), all_probs_cpu);
         QueryConverter::transTensorPB(generate_request.mutable_propose_hidden(), hidden_states_cpu);
